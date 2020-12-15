@@ -1,20 +1,42 @@
 #!/bin/bash
 
-# Set variables
-LOCAL_PORT="3306"
-REMOTE_PORT="3306"
-REMOTE_HOST=""
+# Set Default Variable Values
+LOCAL_PORT="80"
+REMOTE_PORT="80"
+REMOTE_HOST="localhost"
+INSTANCE_ID=""
 
 SSM_USER="ssm-user"
 
-#Get Region
-read -p "Enter AWS Region: " REGION
+HelpFunction()
+{
+   echo ""
+   echo "Usage: $0 -h REMOTE_HOST -p REMOTE_PORT -l LOCAL_PORT -i INSTANCE_ID"
+   echo -e "\t-h The remote host you want to connect to"
+   echo -e "\t-p The remote port of the host you want to connect to"
+   echo -e "\t-l the local port you want the connection forwarded to"
+   echo -e "\t-l The Jump Box instance ID"
+   exit 1 # Exit script after printing help
+}
 
-#Get Environment
-read -p "Enter Environment: " ENVIRONMENT
+while getopts "a:b:c:" opt
+do
+   case "$opt" in
+      h ) REMOTE_HOST="$OPTARG" ;;
+      p ) REMOTE_PORT="$OPTARG" ;;
+      l ) LOCAL_PORT="$OPTARG" ;;
+      i ) INSTANCE_ID="$OPTARG" ;;
+      ? ) HelpFunction ;; # Print HelpFunction in case parameter is non-existent
+   esac
+done
 
+# Print HelpFunction in case parameters are empty
+if [ -z "$REMOTE_HOST" ] || [ -z "$REMOTE_PORT" ] || [ -z "$LOCAL_PORT" ] || [ -z "$INSTANCE_ID" ]
+then
+   echo "Some or all of the parameters are empty";
+   HelpFunction
+fi
 
-export AWS_DEFAULT_REGION="${REGION}"
 
 function checkDependencies {
     errorMessages=()
@@ -25,19 +47,6 @@ function checkDependencies {
     aws=$(aws --version 2>&1)
     if [[ $? != 0 ]]; then
         errorMessages+=('AWS CLI not found. Please install the latest version of AWS CLI.')
-    else
-        minVersion="1.16.213"
-        version=$(echo $aws | cut -d' ' -f 1 | cut -d'/' -f 2)
-
-        for i in {1..3}
-        do
-            x=$(echo "$version" | cut -d '.' -f $i)
-            y=$(echo "$minVersion" | cut -d '.' -f $i)
-            if [[ $x < $y ]]; then
-                errorMessages+=('Installed version of AWS CLI does not meet minimum version. Please install the latest version of AWS CLI.')
-                break
-            fi
-        done
     fi
 
     # Check Session Manager Plugin
@@ -63,10 +72,10 @@ function checkDependencies {
     echo -ne "\n"
 }
 
-function setInstanceIdandAz {
-    # Get random running instance with Name:ucom-${ENVIRONMENT}-jump tag
+function GetInstanceAZ {
+    # Get random running instance with Name:${InstanceID}p tag
     echo -ne "Getting available jump instance........\r"
-    result=$(aws ec2 describe-instances --region ${AWS_DEFAULT_REGION} --filter "Name=tag:Name,Values=ucom-${ENVIRONMENT}-jump" --query "Reservations[].Instances[?State.Name == 'running'].{Id:InstanceId, Az:Placement.AvailabilityZone}[]" --output text)
+    result=$(aws ec2 describe-instances --region ${AWS_DEFAULT_REGION} --filter "Name=tag:Name,Values=${ENVIRONMENT}" --query "Reservations[].Instances[?State.Name == 'running'].{Id:InstanceId, Az:Placement.AvailabilityZone}[]" --output text)
 
     if [[ $result ]]; then
         azs=($(echo "$result" | cut -d $'\t' -f 1))
@@ -87,7 +96,7 @@ function setInstanceIdandAz {
     
 }
 
-function SSHKey {
+function LoadSSHKey {
     # Generate SSH key
     echo -ne "Generating SSH key pair................\r"
     echo -e 'y\n' | ssh-keygen -t rsa -f temp -N '' > /dev/null 2>&1
@@ -106,7 +115,7 @@ function SSHKey {
     echo -ne "\n"
 }
 
-function tunnelToInstance {
+function Connect {
     # Connect to instance
     echo -ne "Connecting to instance.................\r"
     ssh -i temp -N -f -M -S temp-ssh.sock -L $LOCAL_PORT:$REMOTE_HOST:$REMOTE_PORT $SSM_USER@$instanceId -o "UserKnownHostsFile=/dev/null" -o "StrictHostKeyChecking=no" -o ProxyCommand="aws ssm start-session --target %h --document-name 'AWS-StartSSHSession' --parameters portNumber=%p --region $AWS_DEFAULT_REGION" > /dev/null 2>&1
@@ -121,15 +130,18 @@ function tunnelToInstance {
     read -rsn1 -p "Press any key to close session."; echo
     ssh -O exit -S temp-ssh.sock *
 }
-
+# BEGIN
 
 # Check for dependencies
-#checkDependencies
+CheckDependencies
 
-#setInstanceIdandAz
+# Get Jump Instance information
+GetJumpInstance
 
-# Load SSH key pair
-#SSHKey
+# Load SSH key pair to Jump Host
+LoadSSHKey
 
 # Connect to instance
-#tunnelToInstance
+Connect
+
+#END
